@@ -1,4 +1,6 @@
+import "leaflet/dist/leaflet.css";
 import "@/app/globals.css";
+import "@/app/map.css";
 import Link from "next/link";
 import { CartProvider } from "@/components/CartProvider";
 import Header from "@/components/Header";

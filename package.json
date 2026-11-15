@@ -24,6 +24,7 @@
     "@react-three/fiber": "^9.8.2",
     "bcryptjs": "^3.0.3",
     "dotenv": "^18.0.9",
+    "leaflet": "^1.9.4",
     "lucide-react": "^1.63.0",
     "motion": "^14.7.1",
     "next": "^16.4.3",

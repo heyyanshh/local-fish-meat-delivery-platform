@@ -3,11 +3,13 @@ import { z } from "zod";
 import { auth } from "@/server/auth";
 import { db, databaseConfigured } from "@/server/db";
 import { createRazorpayOrder, getRazorpayConfig, isRazorpayReady } from "@/server/payments";
+import { checkoutAddressSchema } from "@/lib/checkout-address";
+import { isLocalDemoRequest } from "@/lib/delivery-slots";
 
 const schema = z.object({
   items: z.array(z.object({ productSlug: z.string().min(1), weightGrams: z.number().int().positive(), preparation: z.string().min(1).max(80), quantity: z.number().int().min(1).max(20) })).min(1).max(30),
   slotId: z.string().min(1), idempotencyKey: z.string().min(16).max(128), paymentMethod: z.enum(["COD", "RAZORPAY"]),
-  address: z.object({ name: z.string().min(2).max(80), phone: z.string().min(8).max(24), email: z.email().max(254), address: z.string().min(5).max(300), city: z.string().min(2).max(80), postalCode: z.string().regex(/^\d{6}$/) }),
+  address: checkoutAddressSchema,
   instructions: z.string().max(300).optional().default(""),
 });
 
@@ -22,10 +24,21 @@ function paymentDetails(order, keyId) {
 }
 
 export async function POST(request) {
-  if (!databaseConfigured) return NextResponse.json({ error: "database_not_configured", demoAvailable: true }, { status: 503 });
+  const body = await request.json().catch(() => null);
+  const localDemoRequest = isLocalDemoRequest({
+    nodeEnv: process.env.NODE_ENV,
+    localDemoEnabled: process.env.CUT_CATCH_LOCAL_DEMO === "true",
+    host: request.headers.get("host"),
+  });
+  if (localDemoRequest && typeof body?.slotId === "string" && body.slotId.startsWith("demo-")) {
+    const demoParsed = schema.safeParse(body);
+    if (!demoParsed.success) return NextResponse.json({ error: "invalid_checkout", issues: demoParsed.error.flatten().fieldErrors }, { status: 400 });
+    return NextResponse.json({ error: "database_not_configured", demoAvailable: true }, { status: 503 });
+  }
+  if (!databaseConfigured) return NextResponse.json({ error: "database_not_configured", demoAvailable: localDemoRequest }, { status: 503 });
   const session = await auth();
   if (!session?.user?.id || session.user.role !== "CUSTOMER") return NextResponse.json({ error: "authentication_required" }, { status: 401 });
-  const parsed = schema.safeParse(await request.json().catch(() => null));
+  const parsed = schema.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: "invalid_checkout", issues: parsed.error.flatten().fieldErrors }, { status: 400 });
   const input = parsed.data;
   if (input.paymentMethod === "RAZORPAY" && !isRazorpayReady()) return NextResponse.json({ error: "online_payment_not_configured" }, { status: 503 });

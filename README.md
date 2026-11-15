@@ -13,6 +13,7 @@ The current catalog and delivery windows are sample data. Replace them with veri
 ### Customer
 
 - Create an account and sign in or out.
+- Save a phone number and default delivery address in the account page; saved details prefill checkout.
 - Browse product categories and search by name.
 - View product details and choose available weights, packs, and preparation options.
 - Add products to a browser-persisted cart.
@@ -124,7 +125,7 @@ Requirements: Node.js 20.9 or newer, npm, and Docker Desktop or another PostgreS
        npm run db:migrate
        npm run db:seed
 
-   Sample delivery windows are seeded for PIN 110001. The seed also creates staff accounts only when their corresponding email and non-placeholder password variables are set.
+   Sample live delivery windows are seeded for PIN 110001. Local development uses clearly marked demo windows for any PIN matching the six-digit Indian format, so checkout can be previewed without seeding a matching area. The seed also creates staff accounts only when their corresponding email and non-placeholder password variables are set.
 
 6. Start the application.
 
@@ -147,6 +148,8 @@ Copy .env.example to .env and keep .env out of Git. Never put production secrets
 | AUTH_TRUST_HOST | Enables host trust for local NextAuth setup; deploy only behind a correctly configured host/proxy |
 | NEXTAUTH_URL | Base URL used by authentication callbacks |
 | NEXT_PUBLIC_SITE_URL | Public site base URL |
+| NOMINATIM_BASE_URL | Server-side address search and reverse-geocoding service; defaults to Nominatim |
+| OSM_TILE_URL | Server-side map tile URL template; defaults to OpenStreetMap's standard raster tiles |
 | DEMO_ADMIN_EMAIL / DEMO_ADMIN_PASSWORD | Optional local seed credentials for an admin |
 | DEMO_PICKER_EMAIL / DEMO_PICKER_PASSWORD | Optional local seed credentials for a picker |
 | DEMO_RIDER_EMAIL / DEMO_RIDER_PASSWORD | Optional local seed credentials for a rider |
@@ -157,6 +160,14 @@ Copy .env.example to .env and keep .env out of Git. Never put production secrets
 
 Use test-mode Razorpay credentials during staging. Never expose the key secret, webhook secret, or cleanup secret to client code.
 
+## Map and address selection
+
+Checkout uses Leaflet for the interactive map. Map tiles are served through `/api/v1/map-tile` and cached; search and reverse-geocoding requests go through `/api/v1/geocode` to Nominatim, where results are cached and uncached requests are spaced at least one second apart. OpenStreetMap attribution is shown on the map. The default tile and geocoding services are provided on a best-effort basis and have usage limits; switch `OSM_TILE_URL` and `NOMINATIM_BASE_URL` to compatible services before using the public defaults for higher-traffic production workloads. See the [OpenStreetMap tile policy](https://operations.osmfoundation.org/policies/tiles/) and [Nominatim usage policy](https://operations.osmfoundation.org/policies/nominatim/).
+
+When `NODE_ENV=development`, checkout offers sample windows for any PIN matching the six-digit Indian format and saves a demo order only in the current browser. It does not arrange delivery or take payment. Production with a configured database only offers real windows seeded for active delivery areas and available capacity; a correctly formatted PIN can still be outside configured coverage.
+
+For a production build served locally, set `CUT_CATCH_LOCAL_DEMO=true` in `.env` to use those sample windows for every valid six-digit PIN on `localhost`, `127.0.0.1`, or `::1`. The switch is restricted to loopback hosts; requests to other hosts continue to use database-backed service areas and real delivery slots. Demo orders remain in the current browser and do not arrange delivery or take payment.
+
 ## API overview
 
 All application APIs are Next.js route handlers. Request validation and authentication rules are enforced in the handlers.
@@ -164,6 +175,9 @@ All application APIs are Next.js route handlers. Request validation and authenti
 | Method | Endpoint | Purpose |
 |---|---|---|
 | GET | /api/v1/catalog | Return active products and variants |
+| GET, PATCH | /api/v1/profile | Read or update the signed-in customer's own phone and saved delivery details |
+| GET | /api/v1/geocode?q=... or /api/v1/geocode?lat=...&lon=... | Search or reverse-geocode an Indian address for checkout |
+| GET | /api/v1/map-tile?z=...&x=...&y=... | Fetch a cached map tile for checkout |
 | POST | /api/v1/auth/register | Register a customer account |
 | GET | /api/v1/delivery-slots?postalCode=110001 | List available delivery windows for a PIN |
 | POST | /api/v1/checkout | Validate and create a live order; reserves stock and slot capacity |
@@ -205,7 +219,15 @@ Do not use product imagery as a substitute for application screenshots.
 
 ## Deployment
 
-No deployed application URL is currently configured. Add the real staging or production URL here after deployment. A production deployment also needs a managed PostgreSQL database, HTTPS, distinct secrets, backups, monitoring, supported delivery areas, and a scheduled call to the payment-expiry endpoint.
+### Render free college-project deployment
+
+The root `render.yaml` is a Render Blueprint for this full-stack Next.js app. It provisions a Node web service and PostgreSQL database in Singapore, generates `AUTH_SECRET`, applies Prisma migrations, seeds the sample catalog and delivery windows, and starts the app. `NEXTAUTH_URL` and `NEXT_PUBLIC_SITE_URL` are linked to Render's assigned HTTPS URL. Local demo mode stays off on the hosted site.
+
+To deploy, push the repository to GitHub, open Render's Dashboard, choose **New > Blueprint**, connect this repository, and deploy the Blueprint. Render then automatically deploys later commits to the linked branch.
+
+This uses Render's free instances for a college/demo project. The web service sleeps after 15 minutes without traffic and can take about a minute to wake. The free PostgreSQL database is limited to 1 GB and expires after 30 days; after its grace period Render deletes its data. Do not use this free database for durable customer/order data. The sample seed currently enables checkout delivery windows only for PIN `110001`; configure actual zones before presenting live delivery coverage. Razorpay is not configured, so checkout uses cash on delivery.
+
+Render free-tier limits can change; see [Render's free instance details](https://render.com/docs/free). A real customer launch needs durable managed PostgreSQL, verified delivery areas and operating data, payment credentials, backups, monitoring, and a scheduled call to the payment-expiry endpoint.
 
 ## Known limitations and future improvements
 

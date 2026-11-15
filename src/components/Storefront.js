@@ -7,6 +7,7 @@ import { motion } from "motion/react";
 import HeroExperience from "@/components/HeroExperience";
 import ProductCard from "@/components/ProductCard";
 import { categories } from "@/lib/products";
+import { isValidIndianPinCode, sanitizePinCode } from "@/lib/delivery-slots";
 
 export default function Storefront({ initialProducts = [], catalogMode = "demo" }) {
   const products = initialProducts;
@@ -31,11 +32,11 @@ export default function Storefront({ initialProducts = [], catalogMode = "demo" 
 
     <section className="service-strip page-gutter" aria-label="Check delivery service">
       <div className="service-intro"><MapPin size={17} /><span>Is your counter around the corner?</span></div>
-      <form className="service-form" onSubmit={(event) => { event.preventDefault(); setChecked(postalCode.trim().length >= 5); }}>
-        <label className="sr-only" htmlFor="postal-code">Enter your PIN code</label><input id="postal-code" inputMode="numeric" maxLength={6} placeholder="Enter your PIN code" value={postalCode} onChange={(event) => { setPostalCode(event.target.value.replace(/\D/g, "")); setChecked(false); }} />
+      <form className="service-form" onSubmit={(event) => { event.preventDefault(); setChecked(true); }}>
+        <label className="sr-only" htmlFor="postal-code">Enter your six-digit PIN code</label><input id="postal-code" inputMode="numeric" pattern="[1-9][0-9]{5}" maxLength={6} placeholder="Enter your six-digit PIN" value={postalCode} onChange={(event) => { setPostalCode(sanitizePinCode(event.target.value)); setChecked(false); }} />
         <button type="submit" aria-label="Check delivery area">{checked ? <Check size={17} /> : <ArrowRight size={17} />}</button>
       </form>
-      <p className="service-result" aria-live="polite">{checked ? "Great — we’re building our local delivery network here." : "A quick check. No account needed."}</p>
+      <p className="service-result" aria-live="polite">{checked ? isValidIndianPinCode(postalCode) ? "PIN format looks good. Check current delivery availability at checkout." : "Enter a valid six-digit PIN code." : "A quick check. No account needed."}</p>
     </section>
 
     <section className="catalog-section page-gutter" id="shop">

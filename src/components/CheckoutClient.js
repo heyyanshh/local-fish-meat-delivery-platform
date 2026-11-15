@@ -2,16 +2,18 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { ArrowLeft, ArrowRight, Check } from "lucide-react";
 import { useCart } from "@/components/CartProvider";
 import { formatPrice, formatLineOption } from "@/lib/products";
+import { demoDeliverySlots, isValidIndianPinCode, sanitizePinCode } from "@/lib/delivery-slots";
 
-const demoSlots = [
-  { id: "demo-morning", label: "Today · 10 am–1 pm", detail: "A little sooner", demo: true },
-  { id: "demo-evening", label: "Today · 4 pm–7 pm", detail: "After the day slows down", demo: true },
-  { id: "demo-tomorrow", label: "Tomorrow · 10 am–1 pm", detail: "Plan ahead", demo: true },
-];
+const DeliveryMapPicker = dynamic(() => import("@/components/DeliveryMapPicker"), {
+  ssr: false,
+  loading: () => <div className="delivery-map-loading" role="status">Loading the location map…</div>,
+});
+const localProfileKey = "cutcatch-saved-delivery-v1";
 
 function loadRazorpayCheckout() {
   if (window.Razorpay) return Promise.resolve(true);
@@ -28,21 +30,60 @@ function loadRazorpayCheckout() {
 export default function CheckoutClient() {
   const router = useRouter();
   const { items, subtotal, clear, ready } = useCart();
-  const [slots, setSlots] = useState(demoSlots);
-  const [slotId, setSlotId] = useState(demoSlots[0].id);
-  const [form, setForm] = useState({ name: "", phone: "", email: "", address: "", city: "", postalCode: "", instructions: "" });
+  const [slots, setSlots] = useState([]);
+  const [slotId, setSlotId] = useState("");
+  const [form, setForm] = useState({ name: "", phone: "", email: "", address: "", city: "", state: "", postalCode: "", latitude: null, longitude: null, instructions: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [deliveryError, setDeliveryError] = useState("");
+  const [loadingSlots, setLoadingSlots] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState("COD");
   const [razorpayAvailable, setRazorpayAvailable] = useState(false);
   const idempotencyKey = useRef(null);
+  const touchedFields = useRef(new Set());
 
   useEffect(() => {
-    let active = true;
-    const query = form.postalCode ? `?postalCode=${encodeURIComponent(form.postalCode)}` : "";
-    fetch(`/api/v1/delivery-slots${query}`).then((response) => response.json()).then((data) => {
-      if (!active) return;
+    const controller = new AbortController();
+    fetch("/api/v1/profile", { signal: controller.signal, cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) return null;
+        const data = await response.json();
+        if (data.mode === "local-demo") {
+          try {
+            const localProfile = JSON.parse(localStorage.getItem(localProfileKey) || "null");
+            if (localProfile && typeof localProfile === "object") data.profile = { ...data.profile, ...localProfile };
+          } catch {}
+        }
+        return data;
+      })
+      .then((data) => {
+        const profile = data?.profile;
+        if (!profile || controller.signal.aborted) return;
+        setForm((current) => {
+          const next = { ...current };
+          for (const field of ["name", "email", "phone", "address", "city", "state", "postalCode", "latitude", "longitude"]) {
+            const empty = next[field] === "" || next[field] == null;
+            const hasSavedValue = profile[field] !== "" && profile[field] != null;
+            if (!touchedFields.current.has(field) && empty && hasSavedValue) next[field] = profile[field];
+          }
+          return next;
+        });
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    if (!isValidIndianPinCode(form.postalCode)) return () => controller.abort();
+    fetch(`/api/v1/delivery-slots?postalCode=${encodeURIComponent(form.postalCode)}`, { signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "delivery_slots_unavailable");
+        return data;
+      }).then((data) => {
+      if (controller.signal.aborted) return;
       if (data.mode === "database" && Array.isArray(data.slots)) {
         setSlots(data.slots.map((slot) => ({ id: slot.id, label: `${new Date(slot.startsAt).toLocaleDateString("en-IN", { weekday: "short", month: "short", day: "numeric" })} · ${new Date(slot.startsAt).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}–${new Date(slot.endsAt).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}`, detail: `${slot.capacity - slot.reservedCount} places left` })));
         setSlotId(data.slots[0]?.id || "");
@@ -51,21 +92,76 @@ export default function CheckoutClient() {
         if (!data.razorpayAvailable) setPaymentMethod("COD");
       } else if (data.mode === "demo") {
         setDemoMode(true);
-        setSlots(demoSlots);
-        setSlotId((current) => current.startsWith("demo-") ? current : demoSlots[0].id);
+        const availableSlots = Array.isArray(data.slots) && data.slots.length ? data.slots : demoDeliverySlots;
+        setSlots(availableSlots);
+        setSlotId(availableSlots[0]?.id || "");
         setRazorpayAvailable(false);
         setPaymentMethod("COD");
-      } else { setSlots([]); setSlotId(""); setError("Delivery windows are unavailable right now. Please try again."); }
-    }).catch(() => { if (active) setError("We couldn’t load delivery windows. Please try again."); });
-    return () => { active = false; };
+      } else {
+        setSlots([]);
+        setSlotId("");
+        setDemoMode(false);
+        setRazorpayAvailable(false);
+        setDeliveryError(data.mode === "unavailable" ? "Live delivery is not configured yet. Please contact the counter." : "Delivery windows could not be checked right now. Please try again.");
+      }
+    }).catch((cause) => {
+      if (cause.name !== "AbortError") {
+        setSlots([]);
+        setSlotId("");
+        setDemoMode(false);
+        setDeliveryError("We couldn’t load delivery windows. Please try again.");
+      }
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoadingSlots(false);
+    });
+    return () => controller.abort();
   }, [form.postalCode]);
 
-  const update = (event) => setForm((current) => ({ ...current, [event.target.name]: event.target.value }));
+  const update = (event) => {
+    const { name } = event.target;
+    const value = name === "postalCode" ? sanitizePinCode(event.target.value) : event.target.value;
+    touchedFields.current.add(name);
+    setForm((current) => ({ ...current, [name]: value }));
+    if (name === "postalCode") {
+      setError("");
+      setDeliveryError("");
+      setSlots([]);
+      setSlotId("");
+      setDemoMode(false);
+      setRazorpayAvailable(false);
+      setLoadingSlots(isValidIndianPinCode(value));
+    }
+  };
+  const selectLocation = (location) => {
+    const nextPostalCode = typeof location.postalCode === "string" ? sanitizePinCode(location.postalCode) : form.postalCode;
+    for (const field of ["address", "city", "state", "postalCode", "latitude", "longitude"]) {
+      if (Object.hasOwn(location, field)) touchedFields.current.add(field);
+    }
+    if (nextPostalCode !== form.postalCode) {
+      setError("");
+      setDeliveryError("");
+      setSlots([]);
+      setSlotId("");
+      setDemoMode(false);
+      setRazorpayAvailable(false);
+      setLoadingSlots(isValidIndianPinCode(nextPostalCode));
+    }
+    setForm((current) => ({
+      ...current,
+      address: typeof location.address === "string" ? location.address : current.address,
+      city: typeof location.city === "string" ? location.city : current.city,
+      state: typeof location.state === "string" ? location.state : current.state,
+      postalCode: typeof location.postalCode === "string" ? nextPostalCode : current.postalCode,
+      latitude: typeof location.latitude === "number" ? location.latitude : current.latitude,
+      longitude: typeof location.longitude === "number" ? location.longitude : current.longitude,
+    }));
+  };
   const delivery = subtotal >= 50000 ? 0 : 4900;
 
   async function submit(event) {
     event.preventDefault(); setError("");
     if (!items.length) { setError("Your bag is empty. Add something from the counter first."); return; }
+    if (!isValidIndianPinCode(form.postalCode)) { setError("Enter a valid six-digit PIN code to continue."); return; }
     if (!slotId) { setError("Choose a delivery window to continue."); return; }
     setBusy(true);
     if (!idempotencyKey.current) idempotencyKey.current = crypto.randomUUID();
@@ -125,14 +221,28 @@ export default function CheckoutClient() {
   if (items.length === 0) return <main className="subpage"><h1 className="page-title">Nothing to<br /><em>check out.</em></h1><p className="page-lede">Your bag is empty right now.</p><Link className="button button-dark" href="/shop">Return to the counter <ArrowRight size={15} /></Link></main>;
 
   return <main className="subpage"><div className="breadcrumbs"><Link href="/cart"><ArrowLeft size={13} /> Your bag</Link><span>/</span><span>Checkout</span></div><div className="eyebrow"><span className="eyebrow-line" /> ALMOST AT YOUR KITCHEN</div><h1 className="page-title">A few little<br /><em>details.</em></h1><div className="checkout-grid"><form onSubmit={submit} className="form-stack">
-    <section className="form-panel"><h2>Where should we bring it?</h2><div className="form-grid"><div className="field"><label htmlFor="name">Your name</label><input required id="name" name="name" autoComplete="name" value={form.name} onChange={update} /></div><div className="field"><label htmlFor="phone">Phone number</label><input required id="phone" name="phone" autoComplete="tel" inputMode="tel" value={form.phone} onChange={update} /></div><div className="field full"><label htmlFor="address">Address</label><textarea required id="address" name="address" autoComplete="street-address" value={form.address} onChange={update} /></div><div className="field"><label htmlFor="city">City</label><input required id="city" name="city" autoComplete="address-level2" value={form.city} onChange={update} /></div><div className="field"><label htmlFor="postalCode">PIN code</label><input required id="postalCode" name="postalCode" inputMode="numeric" maxLength={6} autoComplete="postal-code" value={form.postalCode} onChange={update} /></div><div className="field full"><label htmlFor="email">Email for your order details</label><input required id="email" type="email" name="email" autoComplete="email" value={form.email} onChange={update} /></div><div className="field full"><label htmlFor="instructions">Delivery note (optional)</label><input id="instructions" name="instructions" placeholder="Gate, floor, or a helpful landmark" value={form.instructions} onChange={update} /></div></div></section>
-    <section className="form-panel"><h2>Choose a delivery window</h2>{slots.length ? <div className="slots">{slots.map((slot) => <button type="button" className={`slot-option ${slotId === slot.id ? "selected" : ""}`} key={slot.id} onClick={() => setSlotId(slot.id)}>{slot.label}<small>{slot.detail}</small></button>)}</div> : <div className="notice">{/^\d{6}$/.test(form.postalCode) ? "No delivery windows are set up for this PIN. The local sample setup has test windows for 110001 only; if you entered 110001, the database may need its delivery windows seeded." : "Enter your 6-digit PIN code to see local delivery windows."}</div>}</section>
+    <section className="form-panel">
+      <h2>Where should we bring it?</h2>
+      <DeliveryMapPicker onLocationSelect={selectLocation} selectedLocation={form} />
+      <p className="map-privacy-note">The visible map area is served through OpenStreetMap. Address searches and selected points are sent to its geocoder to fill address details. Device location is requested only if you click “Use my current location”.</p>
+      <div className="form-grid">
+        <div className="field"><label htmlFor="name">Your name</label><input required id="name" name="name" autoComplete="name" value={form.name} onChange={update} /></div>
+        <div className="field"><label htmlFor="phone">Phone number</label><input required id="phone" name="phone" autoComplete="tel" inputMode="tel" value={form.phone} onChange={update} /></div>
+        <div className="field full"><label htmlFor="address">Address</label><textarea required id="address" name="address" autoComplete="street-address" value={form.address} onChange={update} /></div>
+        <div className="field"><label htmlFor="city">City</label><input required id="city" name="city" autoComplete="address-level2" value={form.city} onChange={update} /></div>
+        <div className="field"><label htmlFor="state">State</label><input id="state" name="state" autoComplete="address-level1" value={form.state} onChange={update} /></div>
+        <div className="field"><label htmlFor="postalCode">PIN code</label><input required id="postalCode" name="postalCode" inputMode="numeric" pattern="[1-9][0-9]{5}" maxLength={6} autoComplete="postal-code" value={form.postalCode} onChange={update} aria-describedby="postal-code-hint" aria-invalid={Boolean(form.postalCode) && !isValidIndianPinCode(form.postalCode)} /><small id="postal-code-hint" className="field-hint">Enter any six-digit Indian PIN for the local demo. Live delivery is limited to configured service areas.</small></div>
+        <div className="field full"><label htmlFor="email">Email for your order details</label><input required id="email" type="email" name="email" autoComplete="email" value={form.email} onChange={update} /></div>
+        <div className="field full"><label htmlFor="instructions">Delivery note (optional)</label><input id="instructions" name="instructions" placeholder="Gate, floor, or a helpful landmark" value={form.instructions} onChange={update} /></div>
+      </div>
+    </section>
+    <section className="form-panel"><h2>Choose a delivery window</h2>{loadingSlots ? <div className="notice" role="status">Checking delivery windows for this PIN…</div> : slots.length ? <div className="slots">{slots.map((slot) => <button type="button" className={`slot-option ${slotId === slot.id ? "selected" : ""}`} key={slot.id} onClick={() => setSlotId(slot.id)}>{slot.label}<small>{slot.detail}</small></button>)}</div> : <div className="notice" role="status">{deliveryError || (!form.postalCode ? "Choose a location or enter a six-digit PIN to check delivery windows." : !isValidIndianPinCode(form.postalCode) ? "PIN codes must contain exactly six digits. This is a format check, not a delivery-area check." : demoMode ? "Sample delivery windows are temporarily unavailable. Please try again." : "This PIN is formatted correctly, but no live delivery window is available for it. It may be outside configured delivery areas or all windows may be full. Try another location or contact the counter.")}</div>}</section>
     <section className="form-panel"><h2>Payment</h2><div className="payment-choices">
       <label className="payment-choice"><input type="radio" name="paymentMethod" value="COD" checked={paymentMethod === "COD"} onChange={() => setPaymentMethod("COD")} /><span><b>{demoMode ? "Demo order" : "Cash on delivery"}</b><small>{demoMode ? "Saved in this browser only; no payment or delivery is arranged." : "Pay when your order arrives."}</small></span></label>
       {razorpayAvailable && <label className="payment-choice"><input type="radio" name="paymentMethod" value="RAZORPAY" checked={paymentMethod === "RAZORPAY"} onChange={() => setPaymentMethod("RAZORPAY")} /><span><b>Pay online</b><small>Secure checkout through Razorpay.</small></span></label>}
       {!demoMode && !razorpayAvailable && <div className="notice"><Check size={13} /> Online payments will appear here after Razorpay test credentials and webhook secret are configured.</div>}
     </div></section>
     {demoMode && <div className="notice warning">Demo checkout is local to this browser. It does not reserve real stock, arrange delivery, or take payment.</div>}
-    {error && <p className="form-error" role="alert">{error}</p>}<button className="button button-dark" disabled={busy || !slotId} type="submit"><span>{busy ? (paymentMethod === "RAZORPAY" ? "Preparing secure checkout…" : "Placing your order…") : !slotId ? "No delivery window available" : paymentMethod === "RAZORPAY" ? "Pay securely" : demoMode ? "Place demo order" : "Place order"}</span><ArrowRight size={16} /></button>
+    {error && <p className="form-error" role="alert">{error}</p>}<button className="button button-dark" disabled={busy || loadingSlots || !isValidIndianPinCode(form.postalCode) || !slotId} type="submit"><span>{busy ? (paymentMethod === "RAZORPAY" ? "Preparing secure checkout…" : "Placing your order…") : loadingSlots ? "Checking delivery windows…" : !isValidIndianPinCode(form.postalCode) ? "Enter a valid six-digit PIN" : !slotId ? "No delivery window available" : paymentMethod === "RAZORPAY" ? "Pay securely" : demoMode ? "Place demo order" : "Place order"}</span><ArrowRight size={16} /></button>
   </form><aside className="summary-card"><h2>Your selection</h2>{items.map((item) => <div className="summary-row" key={item.key}><span>{item.quantity} × {item.name}<small className="summary-sub">{formatLineOption(item)}</small></span><span>{formatPrice(item.unitPrice * item.quantity)}</span></div>)}<div className="summary-row"><span>Delivery</span><span>{delivery === 0 ? "On us" : formatPrice(delivery)}</span></div><div className="summary-row total"><span>Total</span><span>{formatPrice(subtotal + delivery)}</span></div><p className="small-note">The server recalculates all prices and availability for live orders.</p></aside></div></main>;
 }
