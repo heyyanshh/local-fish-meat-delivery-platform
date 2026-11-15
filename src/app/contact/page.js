@@ -1,0 +1,3 @@
+import Link from "next/link";
+export const metadata = { title: "Contact" };
+export default function Page() { return <main className="subpage"><div className="eyebrow"><span className="eyebrow-line" /> HERE TO HELP</div><h1 className="page-title">Let’s talk<br /><em>good food.</em></h1><p className="page-lede">This course project preview does not yet connect to a support inbox. For a demo issue, include the order reference and contact the project owner.</p><div className="notice" style={{ maxWidth: 580, marginTop: 28 }}>Support requests are not submitted or stored by this preview.</div><Link className="text-link" href="/faq">Read common questions <span>→</span></Link></main>; }
